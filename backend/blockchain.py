@@ -19,6 +19,7 @@ from . import crypto, pow as pow_mod
 from .block import Block, make_genesis_block
 from .config import COINBASE_REWARD, GENESIS_PREV_HASH
 from .contract import ContractEngine
+from .reorg_history import ReorgHistory
 from .state import WorldState, ZERO_ADDRESS
 from .storage import (DataPaths, VersionLedger, atomic_write_json, read_json)
 from .transaction import Transaction, TX_COINBASE
@@ -39,6 +40,7 @@ class Blockchain:
         self.chainwork = 0              # cumulative work of the main chain
         self.engine = ContractEngine(cfg)
         self.versions = VersionLedger(paths.versions_path)
+        self.reorg_history = ReorgHistory(paths.reorgs_path)
         self.last_abandoned = []
         self.last_receipts = []
         self._loaded = False
@@ -318,10 +320,13 @@ class Blockchain:
         branch = self._trace_branch(block)
         if branch is None:
             return "stored_fork", "competing block stored (branch incomplete)"
-        branch_work = self.cumulative_work_of(branch)
-        main_work_at_ancestor = self.cumulative_work_of(
-            self.chain[:branch[0].index + 1]) if branch else 0
-        if branch_work + main_work_at_ancestor > self.chainwork:
+        # Total work if we switched onto this branch: work up to and
+        # including the fork-point ancestor, plus the branch's own work.
+        fork_height = branch[0].index - 1
+        work_at_fork = self.cumulative_work_of(
+            self.chain[:fork_height + 1]) if fork_height >= 0 else 0
+        branch_work = work_at_fork + self.cumulative_work_of(branch)
+        if branch_work > self.chainwork:
             return self._reorg(branch)
         return "stored_fork", "competing block stored (weaker branch)"
 
@@ -355,6 +360,10 @@ class Blockchain:
         """
         ancestor_height = branch[0].index - 1
         abandoned = self.chain[ancestor_height + 1:]
+        old_head = self.head
+        work_before = self.chainwork
+        abandoned_compact = [self.compact_block(b) for b in abandoned]
+        adopted_compact = [self.compact_block(b) for b in branch]
 
         # Roll back state to the ancestor snapshot.
         ancestor_state_data = read_json(self.paths.state_path(ancestor_height))
@@ -381,10 +390,20 @@ class Blockchain:
         self.last_receipts = all_receipts
         self._write_meta()
         self.versions.record(self.height, self.head.hash)
-        # Clean fork_store of now-main blocks.
-        for b in branch:
-            self.fork_store.pop(b.index, None)
-        return "reorg", (f"reorg at height {ancestor_height}: "
+        # Remove only the blocks that just became main-chain blocks; any
+        # sibling competitors at the same heights remain tracked as forks.
+        branch_hashes = {b.hash for b in branch}
+        for h, blocks in list(self.fork_store.items()):
+            remaining = [b for b in blocks if b.hash not in branch_hashes]
+            if remaining:
+                self.fork_store[h] = remaining
+            else:
+                self.fork_store.pop(h, None)
+        event = self.reorg_history.record(
+            ancestor_height, abandoned_compact, adopted_compact,
+            old_head=old_head, new_head=self.head,
+            chainwork_before=work_before, chainwork_after=self.chainwork)
+        return "reorg", (f"reorg #{event['id']} at height {ancestor_height}: "
                          f"rolled back {len(abandoned)} block(s), "
                          f"applied {applied} block(s)")
 
@@ -450,6 +469,114 @@ class Blockchain:
             "tx_count": block.display_tx_count(), "nonce": block.nonce,
             "merkle_root": block.header.merkle_root,
             "state_root": block.state_root,
+        }
+
+    def compact_block(self, block):
+        """Small serialisable view of a (possibly discarded) block.
+
+        Used for reorg history and fork-branch records where the full block
+        body may no longer be reachable from the chain head.
+        """
+        return {
+            "index": block.index, "hash": block.hash,
+            "prev_hash": block.prev_hash, "timestamp": block.timestamp,
+            "difficulty": block.difficulty,
+            "tx_count": block.display_tx_count(), "nonce": block.nonce,
+            "merkle_root": block.header.merkle_root,
+            "state_root": block.state_root,
+        }
+
+    def get_orphan(self, hash_hex):
+        """Return the reorg-history record for a discarded block, if any."""
+        return self.reorg_history.orphan(hash_hex)
+
+    def active_fork_branches(self):
+        """Describe every competing branch currently living in ``fork_store``.
+
+        Each returned branch traces back to either the main chain (``complete``
+        — the fork point is known) or to an ancestor we do not possess
+        (``incomplete`` — e.g. the tip of a longer chain before sync).  Shared
+        blocks appear on every branch that descends from them; the UI
+        de-duplicates by hash.
+        """
+        by_hash = {}
+        for blocks in self.fork_store.values():
+            for b in blocks:
+                by_hash[b.hash] = b
+
+        branches = []
+        seen_tips = set()
+        for tip in by_hash.values():
+            # A tip has no fork-store child extending it.
+            if any(o.prev_hash == tip.hash for o in by_hash.values()):
+                continue
+            if tip.hash in seen_tips:
+                continue
+            seen_tips.add(tip.hash)
+
+            path = []
+            current = tip
+            complete = False
+            seen = set()
+            while current is not None and current.hash not in seen:
+                seen.add(current.hash)
+                path.append(current)
+                if current.index > 0:
+                    parent = self.get_block(current.index - 1)
+                    if parent is not None and parent.hash == current.prev_hash:
+                        complete = True
+                        break
+                current = by_hash.get(current.prev_hash)
+            path.reverse()
+
+            # Fork point = the main-chain block the first branch block
+            # attaches to (when the branch is complete).
+            fork_point = None
+            if complete and path:
+                parent = self.get_block(path[0].index - 1)
+                if parent is not None:
+                    fork_point = {"height": parent.index, "hash": parent.hash}
+            branches.append({
+                "status": "complete" if complete else "incomplete",
+                "tip_hash": tip.hash,
+                "tip_height": tip.index,
+                "length": len(path),
+                "fork_point": fork_point,
+                "work": self.cumulative_work_of(path),
+                "blocks": [self.compact_block(b) for b in path],
+            })
+        branches.sort(key=lambda br: (br["fork_point"] or {}).get("height", 0),
+                      reverse=True)
+        return branches
+
+    def reorg_overview(self):
+        """Full payload for the reorg-history view."""
+        main_hashes = {b.hash for b in self.chain}
+
+        def tag_block(b):
+            rec = self.compact_block(b)
+            rec["on_main"] = True
+            rid = self.reorg_history.readopted_by(b.hash)
+            if rid:
+                rec["readopted_by"] = rid
+            return rec
+
+        events = []
+        for e in reversed(self.reorg_history.events):
+            ev = dict(e)
+            ev["adopted"] = [{**b, "on_main": b["hash"] in main_hashes}
+                             for b in ev["adopted"]]
+            ev["abandoned"] = [{**b, "on_main": b["hash"] in main_hashes}
+                               for b in ev["abandoned"]]
+            events.append(ev)
+
+        return {
+            "height": self.height,
+            "head_hash": self.head.hash if self.head else None,
+            "main_chain": [tag_block(b) for b in self.chain],
+            "fork_branches": self.active_fork_branches(),
+            "events": events,
+            "orphans": self.reorg_history.orphan_summary(),
         }
 
     def transactions_for(self, address, limit=200):

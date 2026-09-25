@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>重组历史 · LightChain</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<style>
+  /* ---------- fork graph ---------- */
+  .graph-wrap { overflow-x: auto; border: 1px solid var(--border);
+    border-radius: 8px; background: #0b0f1a; padding: 8px; }
+  svg.forks { display: block; min-width: 100%; }
+  svg.forks rect.node { stroke-width: 1.5; cursor: pointer; transition: opacity .15s; }
+  svg.forks g.blk { cursor: pointer; }
+  svg.forks g.blk:hover rect.node { stroke-width: 2.5; }
+  svg.forks rect.main { fill: #16233c; stroke: var(--accent); }
+  svg.forks rect.main.genesis { stroke: var(--purple); }
+  svg.forks rect.active { fill: #33290f; stroke: var(--amber); }
+  svg.forks rect.orphan { fill: #3a171c; stroke: var(--red);
+    stroke-dasharray: 4 2; opacity: .92; }
+  svg.forks text { font-family: var(--mono); pointer-events: none; }
+  svg.forks .lbl { fill: var(--text); font-size: 11px; font-weight: 700; }
+  svg.forks .sub { fill: var(--muted); font-size: 9px; }
+  svg.forks .tag-main { fill: var(--accent); font-size: 8.5px; font-weight: 700; }
+  svg.forks .tag-back { fill: #06281d; }
+  svg.forks .tag-back-t { fill: var(--green); font-size: 8.5px; font-weight: 700; }
+  svg.forks .eid-t { font-size: 8.5px; font-weight: 700; }
+  svg.forks .conn { fill: none; stroke: #46536f; stroke-width: 1.6; }
+  svg.forks .conn.main { stroke: #5b729c; stroke-width: 2; }
+  svg.forks .conn.active { stroke: var(--amber); }
+  svg.forks .conn.orphan { stroke: var(--red); stroke-dasharray: 5 3; }
+  svg.forks .forkline { stroke: #7c89a8; stroke-width: 1; stroke-dasharray: 3 4;
+    opacity: .55; }
+  svg.forks .fork-cap { fill: var(--muted); font-size: 9.5px; }
+  svg.forks .headtag { font-size: 10px; font-weight: 700; }
+  svg.forks .axis-t { fill: var(--faint); font-size: 9px; }
+  svg.forks .dim { opacity: .18; }
+  svg.forks g.hl rect.node { stroke-width: 3; filter: drop-shadow(0 0 5px currentColor); }
+  .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+    margin-right: 5px; vertical-align: -1px; }
+  .ev-card { border-left: 3px solid var(--red); cursor: pointer;
+    transition: background .15s, border-color .15s; }
+  .ev-card:hover { background: var(--panel-2); }
+  .ev-card.selected { border-color: var(--accent); background: var(--panel-2); }
+  .seg-btns .btn { padding: 6px 12px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside id="sidebar"></aside>
+  <div class="main">
+    <header id="topbar"></header>
+    <main class="content">
+      <div class="page-head">
+        <h1>重组历史</h1>
+        <p>主链之外，同时展示曾经出现的竞争链：分叉点、竞争链长度、每次重组被丢弃的区块，以及链头如何切换。</p>
+      </div>
+
+      <div class="grid cols-4">
+        <div class="card stat accent"><div class="label">重组次数</div><div class="value" id="stReorgs">—</div></div>
+        <div class="card stat amber"><div class="label">当前竞争链</div><div class="value" id="stForks">—</div></div>
+        <div class="card stat"><div class="label">被丢弃区块</div><div class="value" id="stOrphans" style="color:var(--red)">—</div></div>
+        <div class="card stat green"><div class="label">后又回到主链</div><div class="value" id="stBack">—</div></div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <div class="flex">
+          <h2 style="margin:0;">分叉与重组全景图</h2>
+          <div class="spacer"></div>
+          <div class="seg-btns flex" style="gap:6px;">
+            <button class="btn ghost sm" data-win="20">近 20 高度</button>
+            <button class="btn ghost sm" data-win="50">近 50 高度</button>
+            <button class="btn ghost sm primary" data-win="all">全部</button>
+          </div>
+        </div>
+        <div class="flex" style="margin:10px 0 4px; gap:18px; font-size:12px; color:var(--muted);">
+          <span><span class="legend-dot" style="background:var(--accent);"></span>主链区块</span>
+          <span><span class="legend-dot" style="background:var(--amber);"></span>当前竞争链（fork store）</span>
+          <span><span class="legend-dot" style="background:var(--red);"></span>重组丢弃的区块</span>
+          <span><span class="legend-dot" style="background:var(--green);"></span>丢弃后又回到主链</span>
+          <span class="hint">蓝标 R# = 在该次重组中新入主链 · 红标 R# = 在该次重组中被淘汰</span>
+        </div>
+        <div id="graphWrap" class="graph-wrap"><div class="empty">加载中…</div></div>
+      </div>
+
+      <div class="grid cols-2" style="margin-top:16px; grid-template-columns: 1.1fr .9fr; align-items:start;">
+        <div class="card">
+          <h2>重组时间轴 <span class="hint" id="evHint"></span></h2>
+          <p class="sub">按时间倒序。点击任意一次重组，可在全景图中高亮本次分叉，并看清链头从哪个区块切换到哪个区块。</p>
+          <div id="eventList"></div>
+        </div>
+        <div class="card">
+          <h2>被丢弃区块清单 <span class="hint" id="orphanHint"></span></h2>
+          <p class="sub">每个区块都保留其原始高度，并标注它是在哪一次重组中被淘汰的。</p>
+          <div id="orphanTable"></div>
+        </div>
+      </div>
+
+      <div id="detailCard" class="card" style="margin-top:16px; display:none;"></div>
+    </main>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/app.js"></script>
+<script>
+window.PAGE = "reorgs";
+
+/* ---------- graph geometry ---------- */
+const COL_W = 92, NODE_W = 76, NODE_H = 40, LANE_H = 64;
+const PAD_L = 28, PAD_R = 60, TOP = 34;
+
+let DATA = null;
+let windowMode = "all";
+let selectedEvent = null;
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+async function init() {
+  await loadData(true);
+  pollStatus(6000);
+  setInterval(() => loadData(false), 6000);
+  document.querySelectorAll("[data-win]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      windowMode = btn.dataset.win;
+      document.querySelectorAll("[data-win]").forEach(b =>
+        b.classList.toggle("primary", b === btn));
+      renderGraph();
+    });
+  });
+}
+
+async function loadData(initial) {
+  try {
+    DATA = await API.get("/api/chain/reorgs");
+  } catch (e) {
+    $("#graphWrap").innerHTML =
+      `<div class="empty"><div class="big">🔌</div>无法连接节点：${esc(e.message)}</div>`;
+    return;
+  }
+  // Normalise orphan records onto the compact-block shape ("height" ->
+  // "index") so the graph builder treats every block uniformly.
+  DATA.orphans = (DATA.orphans || []).map(o => ({ ...o, index: o.height }));
+  renderStats();
+  renderGraph();
+  renderEvents();
+  renderOrphans();
+}
+
+function renderStats() {
+  const events = DATA.events || [];
+  const orphans = DATA.orphans || [];
+  $("#stReorgs").textContent = events.length;
+  $("#stForks").textContent = (DATA.fork_branches || []).length;
+  $("#stOrphans").textContent = orphans.filter(o => o.status === "abandoned").length;
+  $("#stBack").textContent = orphans.filter(o => o.status === "readopted").length;
+}
+
+/* ================================================================== */
+/* Build a unified segment model: main chain + active forks + orphan  */
+/* chains, each contiguous in height, assigned to non-overlapping     */
+/* lanes so the main lane itself is never disturbed.                  */
+/* ================================================================== */
+function buildModel() {
+  const main = DATA.main_chain || [];
+  const mainByHash = {};
+  main.forEach(b => { mainByHash[b.hash] = b; });
+
+  // 1) active competing branches from fork_store
+  const activeSegs = [];
+  const placedHashes = {};   // hash already drawn on a side lane
+  (DATA.fork_branches || []).forEach(br => {
+    const blocks = (br.blocks || []).filter(b => !placedHashes[b.hash]);
+    blocks.forEach(b => { placedHashes[b.hash] = true; });
+    if (!blocks.length) return;
+    const first = blocks[0];
+    let parentHash = first.prev_hash, complete = br.status === "complete";
+    if (mainByHash[parentHash]) complete = true;
+    activeSegs.push({ kind: "active", blocks, parentHash, complete,
+                      eid: null, tipHash: br.tip_hash });
+  });
+
+  // 2) discarded-block chains from the orphan registry (status abandoned)
+  const orphans = (DATA.orphans || []).filter(o => o.status === "abandoned");
+  const orByHash = {}, orChildren = {};
+  orphans.forEach(o => {
+    orByHash[o.hash] = o;
+    orChildren[o.prev_hash] = orChildren[o.prev_hash] || [];
+    orChildren[o.prev_hash].push(o.hash);
+  });
+  const orphanSegs = [];
+  const seenOr = new Set();
+  orphans.forEach(o => {
+    if (seenOr.has(o.hash)) return;
+    // descend to the root of this orphan chain
+    let root = o;
+    while (orByHash[root.prev_hash] && !seenOr.has(orByHash[root.prev_hash].hash)) {
+      root = orByHash[root.prev_hash];
+    }
+    const blocks = [];
+    let cur = root;
+    while (cur && !seenOr.has(cur.hash)) {
+      seenOr.add(cur.hash);
+      blocks.push(cur);
+      const kids = (orChildren[cur.hash] || []).filter(h => !seenOr.has(h));
+      cur = kids.length ? orByHash[kids[0]] : null;
+    }
+    if (!blocks.length) return;
+    orphanSegs.push({ kind: "orphan", blocks, parentHash: blocks[0].prev_hash,
+                      complete: !!mainByHash[blocks[0].prev_hash],
+                      eid: blocks[blocks.length - 1].abandoned_by,
+                      tipHash: blocks[blocks.length - 1].hash });
+  });
+
+  // 3) pack side segments into alternating non-overlapping lanes.
+  // Active forks prefer lanes above the main chain, discarded chains below.
+  const side = activeSegs.concat(orphanSegs);
+  side.sort((a, b) => a.blocks[0].index - b.blocks[0].index);
+  const lanes = []; // { side: +1(above)/-1(below), ord: 1..n, segs:[{lo,hi}] }
+  side.forEach(seg => {
+    const lo = seg.blocks[0].index, hi = seg.blocks[seg.blocks.length - 1].index;
+    const prefer = seg.kind === "active" ? 1 : -1;
+    for (const side_ of [prefer, -prefer]) {
+      for (const l of lanes.filter(x => x.side === side_)) {
+        if (l.segs.every(s => hi < s.lo || lo > s.hi)) {
+          l.segs.push({ lo, hi }); seg.lane = l; return;
+        }
+      }
+      // no free lane on this side: open the next one
+      const l = { side: side_, ord: lanes.filter(x => x.side === side_).length + 1,
+                  segs: [{ lo, hi }] };
+      lanes.push(l); seg.lane = l; return;
+    }
+  });
+
+  // 4) main-chain tags: adopted / readopted by which reorg
+  const adoptedBy = {};   // hash -> first reorg id that brought it in
+  (DATA.events || []).forEach(e => {
+    (e.adopted || []).forEach(b => {
+      if (adoptedBy[b.hash] == null) adoptedBy[b.hash] = e.id;
+    });
+  });
+
+  return { main, mainByHash, side, lanes, adoptedBy };
+}
+
+function renderGraph() {
+  if (!DATA) return;
+  const wrap = $("#graphWrap");
+  const model = buildModel();
+  const headH = DATA.height;
+  const hMin = windowMode === "all" ? 0
+      : Math.max(0, headH - parseInt(windowMode, 10) + 1);
+  const hMax = headH;
+
+  const aboveLanes = model.lanes.filter(l => l.side === 1);
+  const belowLanes = model.lanes.filter(l => l.side === -1);
+  const TOP_PAD = 26 + aboveLanes.length * LANE_H;     // room for fork caps/tags
+  const BOTTOM_PAD = 34 + belowLanes.length * LANE_H;  // room for new-head tags + axis
+  const MAIN_Y = TOP_PAD;
+  const GRAPH_H = TOP_PAD + BOTTOM_PAD;
+  const GRAPH_W = PAD_L + (hMax - hMin + 1) * COL_W + PAD_R;
+
+  const xFor = h => PAD_L + (h - hMin) * COL_W + COL_W / 2;
+  const laneY = lane => MAIN_Y - lane.side * lane.ord * LANE_H;
+
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "forks");
+  svg.setAttribute("width", GRAPH_W);
+  svg.setAttribute("height", GRAPH_H);
+  svg.setAttribute("viewBox", `0 0 ${GRAPH_W} ${GRAPH_H}`);
+  svg.innerHTML = `<defs>
+    <marker id="arr-slate" markerWidth="7" markerHeight="7" refX="6" refY="3"
+      orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#5b729c"/></marker>
+    <marker id="arr-amber" markerWidth="7" markerHeight="7" refX="6" refY="3"
+      orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#fbbf24"/></marker>
+    <marker id="arr-red" markerWidth="7" markerHeight="7" refX="6" refY="3"
+      orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#f87171"/></marker>
+  </defs>`;
+
+  const nodePos = {};   // hash -> {x, y, kind}
+
+  const inWin = b => b.index >= hMin && b.index <= hMax;
+  const text = (x, y, str, cls, anchor) => {
+    const t = document.createElementNS(SVG_NS, "text");
+    t.setAttribute("x", x); t.setAttribute("y", y);
+    t.setAttribute("class", cls);
+    t.setAttribute("text-anchor", anchor || "middle");
+    t.textContent = str;
+    return t;
+  };
+
+  /* ---- main chain connectors first (background) ---- */
+  model.main.filter(inWin).forEach((b, i, arr) => {
+    if (i === 0) return;
+    const p = arr[i - 1];
+    const pth = document.createElementNS(SVG_NS, "path");
+    pth.setAttribute("class", "conn main");
+    pth.setAttribute("marker-end", "url(#arr-slate)");
+    pth.setAttribute("d",
+      `M ${xFor(p.index) + NODE_W / 2} ${MAIN_Y} L ${xFor(b.index) - NODE_W / 2 - 2} ${MAIN_Y}`);
+    svg.appendChild(pth);
+  });
+
+  /* ---- side segments: connectors + nodes ---- */
+  model.side.forEach(seg => {
+    const y = laneY(seg.lane);
+    const drawn = seg.blocks.filter(inWin);
+    if (!drawn.length) return;
+    const colorCls = seg.kind;
+    const marker = seg.kind === "active" ? "arr-amber" : "arr-red";
+
+    // fork connector: parent -> first drawn block
+    const first = drawn[0];
+    let px, py;
+    if (nodePos[first.prev_hash]) {
+      ({ x: px, y: py } = nodePos[first.prev_hash]);
+      py += py < MAIN_Y ? NODE_H / 2 : -NODE_H / 2;
+    } else if (model.mainByHash[first.prev_hash]) {
+      const pb = model.mainByHash[first.prev_hash];
+      if (pb.index >= hMin) { px = xFor(pb.index); py = MAIN_Y; }
+      else { px = PAD_L; py = MAIN_Y; }
+      py += y < MAIN_Y ? NODE_H / 2 : -NODE_H / 2;
+    } else {
+      px = xFor(first.index) - COL_W; py = y;
+    }
+    const cx = xFor(first.index), cy = y + (y < MAIN_Y ? NODE_H / 2 : -NODE_H / 2);
+    const cpath = document.createElementNS(SVG_NS, "path");
+    cpath.setAttribute("class", `conn ${colorCls}`);
+    cpath.setAttribute("marker-end", `url(#${marker})`);
+    const midX = (px + cx) / 2;
+    cpath.setAttribute("d",
+      `M ${px} ${py} C ${midX} ${py}, ${midX} ${cy}, ${cx - (y === py ? NODE_W / 2 + 2 : 0)} ${cy}`);
+    svg.appendChild(cpath);
+    if (!seg.complete && !nodePos[first.prev_hash] &&
+        !model.mainByHash[first.prev_hash]) {
+      svg.appendChild(text(px, y - 12, "祖先缺失", "fork-cap"));
+    }
+
+    // intra-segment connectors
+    drawn.forEach((b, i) => {
+      if (i === 0) return;
+      const pth = document.createElementNS(SVG_NS, "path");
+      pth.setAttribute("class", `conn ${colorCls}`);
+      pth.setAttribute("marker-end", `url(#${marker})`);
+      pth.setAttribute("d",
+        `M ${xFor(drawn[i - 1].index) + NODE_W / 2} ${y} L ${xFor(b.index) - NODE_W / 2 - 2} ${y}`);
+      svg.appendChild(pth);
+    });
+
+    drawn.forEach(b => drawBlock(svg, nodePos, xFor, b, y, seg, model));
+  });
+
+  /* ---- main chain nodes ---- */
+  model.main.filter(inWin).forEach(b =>
+    drawBlock(svg, nodePos, xFor, b, MAIN_Y, null, model));
+
+  /* ---- per-event annotations: fork lines + head-switch tags ---- */
+  (DATA.events || []).forEach(e => {
+    if (e.fork_height < hMin - 1) return;
+    const fx = xFor(e.fork_height) + COL_W / 2;
+    const line = document.createElementNS(SVG_NS, "line");
+    line.setAttribute("class", "forkline ev-el");
+    line.setAttribute("data-eid", e.id);
+    line.setAttribute("x1", fx); line.setAttribute("x2", fx);
+    line.setAttribute("y1", 6); line.setAttribute("y2", GRAPH_H - 24);
+    svg.appendChild(line);
+    const cap = text(fx + 3, 18, `分叉于 #${e.fork_height} · R#${e.id}`,
+                     "fork-cap ev-el", "start");
+    cap.setAttribute("data-eid", e.id);
+    svg.appendChild(cap);
+
+    // old head tag (on the orphan lane that holds it)
+    const oh = e.old_head, nh = e.new_head;
+    const oldPos = oh ? nodePos[oh.hash] : null;
+    const newPos = nh ? nodePos[nh.hash] : null;
+    if (oldPos && oh.height >= hMin) {
+      headTag(svg, xFor(oh.height), oldPos.y - 30,
+              `⛔ 旧链头 #${oh.height}`, "#f87171", "#3a171c", e.id);
+    }
+    if (newPos && nh.height >= hMin) {
+      headTag(svg, xFor(nh.height), newPos.y + 46,
+              `✅ 新链头 #${nh.height}`, "#34d399", "#0d2b22", e.id);
+    }
+  });
+
+  /* ---- height axis ---- */
+  const axisY = GRAPH_H - 8;
+  for (let h = hMin; h <= hMax; h++) {
+    const tick = ((h - hMin) % 5 === 0) || h === hMax;
+    if (!tick) continue;
+    svg.appendChild(text(xFor(h), axisY, "#" + h, "axis-t"));
+  }
+
+  /* ---- interactions ---- */
+  svg.addEventListener("click", ev => {
+    const blkEl = ev.target.closest("g.blk");
+    if (blkEl) { showBlock(blkEl.dataset.hash); return; }
+    const evEl = ev.target.closest(".ev-el");
+    if (evEl) selectEvent(parseInt(evEl.dataset.eid, 10));
+  });
+
+  wrap.innerHTML = "";
+  if (!model.main.length) {
+    wrap.innerHTML = `<div class="empty"><div class="big">⛓</div>尚无区块</div>`;
+    return;
+  }
+  wrap.appendChild(svg);
+  if (selectedEvent) applyHighlight(svg, selectedEvent);
+  // keep the latest blocks in view on first paint
+  if (!wrap.dataset.scrolled) { wrap.scrollLeft = wrap.scrollWidth; wrap.dataset.scrolled = "1"; }
+}
+
+function drawBlock(svg, nodePos, xFor, b, y, seg, model) {
+  const x = xFor(b.index);
+  const kind = seg ? seg.kind : "main";
+  const g = document.createElementNS(SVG_NS, "g");
+  g.setAttribute("class", "blk");
+  g.setAttribute("data-hash", b.hash);
+  g.setAttribute("data-kind", kind);
+  if (seg && seg.eid) g.setAttribute("data-eid", seg.eid);
+  if (kind === "main") {
+    const eid = model.adoptedBy[b.hash];
+    if (eid) g.setAttribute("data-adopted-eid", eid);
+    if (b.readopted_by) g.setAttribute("data-readopted-eid", b.readopted_by);
+  }
+
+  const cls = kind === "main"
+      ? "node main" + (b.index === 0 ? " genesis" : "")
+      : "node " + kind;
+  const rect = document.createElementNS(SVG_NS, "rect");
+  rect.setAttribute("class", cls);
+  rect.setAttribute("x", x - NODE_W / 2);
+  rect.setAttribute("y", y - NODE_H / 2);
+  rect.setAttribute("rx", 7); rect.setAttribute("ry", 7);
+  rect.setAttribute("width", NODE_W); rect.setAttribute("height", NODE_H);
+  g.appendChild(rect);
+
+  const title = document.createElementNS(SVG_NS, "title");
+  title.textContent = `#${b.index} ${b.hash}\n${b.tx_count} 笔交易 · 难度 ${b.difficulty}`
+    + (seg && seg.eid ? `\n在重组 R#${seg.eid} 中被淘汰` : "")
+    + (b.readopted_by ? `\n后于重组 R#${b.readopted_by} 回到主链` : "");
+  g.appendChild(title);
+
+  g.appendChild(svgText(x, y - 3, b.index === 0 && kind === "main" ? "创世" : "#" + b.index, "lbl"));
+  let sub;
+  if (kind === "orphan") sub = `淘汰 R#${seg.eid}`;
+  else if (kind === "active") sub = `竞争链 · ${b.tx_count}tx`;
+  else sub = `${b.tx_count} tx`;
+  g.appendChild(svgText(x, y + 11, sub, "sub"));
+
+  // main-chain badges (kept tiny in the corners so normal browsing is intact)
+  if (kind === "main") {
+    if (b.readopted_by) {
+      const c = document.createElementNS(SVG_NS, "circle");
+      c.setAttribute("cx", x - NODE_W / 2 + 7); c.setAttribute("cy", y - NODE_H / 2 + 7);
+      c.setAttribute("r", 7); c.setAttribute("class", "tag-back ev-el");
+      c.setAttribute("data-eid", b.readopted_by);
+      g.appendChild(c);
+      const t = svgText(x - NODE_W / 2 + 7, y - NODE_H / 2 + 10, "↺",
+                        "tag-back-t ev-el");
+      t.setAttribute("data-eid", b.readopted_by);
+      g.appendChild(t);
+    }
+    const eid = model.adoptedBy[b.hash];
+    if (eid) {
+      const t = svgText(x + NODE_W / 2 - 9, y - NODE_H / 2 + 11, "R" + eid,
+                        "eid-t ev-el");
+      t.setAttribute("fill", "#7fb0ff");
+      t.setAttribute("data-eid", eid);
+      g.appendChild(t);
+    }
+  }
+  svg.appendChild(g);
+  nodePos[b.hash] = { x, y, kind };
+}
+
+function svgText(x, y, str, cls, anchor) {
+  const t = document.createElementNS(SVG_NS, "text");
+  t.setAttribute("x", x); t.setAttribute("y", y);
+  t.setAttribute("class", cls);
+  t.setAttribute("text-anchor", anchor || "middle");
+  t.textContent = str;
+  return t;
+}
+
+function headTag(svg, x, y, str, fg, bg, eid) {
+  const w = str.length * 6.4 + 12;
+  const g = document.createElementNS(SVG_NS, "g");
+  g.setAttribute("class", "ev-el");
+  g.setAttribute("data-eid", eid);
+  const r = document.createElementNS(SVG_NS, "rect");
+  r.setAttribute("x", x - w / 2); r.setAttribute("y", y - 12);
+  r.setAttribute("width", w); r.setAttribute("height", 17); r.setAttribute("rx", 4);
+  r.setAttribute("fill", bg); r.setAttribute("stroke", fg); r.setAttribute("stroke-width", 1);
+  g.appendChild(r);
+  const t = svgText(x, y + 1, str, "headtag");
+  t.setAttribute("fill", fg);
+  g.appendChild(t);
+  svg.appendChild(g);
+}
+
+function applyHighlight(svg, eid) {
+  svg.querySelectorAll(".ev-el, g.blk").forEach(el => {
+    const ids = [];
+    if (el.dataset.eid) ids.push(parseInt(el.dataset.eid, 10));
+    if (el.dataset.adoptedEid) ids.push(parseInt(el.dataset.adoptedEid, 10));
+    if (el.dataset.readoptedEid) ids.push(parseInt(el.dataset.readoptedEid, 10));
+    const hit = ids.includes(eid);
+    el.classList.toggle("hl", hit);
+    el.classList.toggle("dim", !hit);
+    if (hit && el.tagName === "g") el.style.color =
+      el.dataset.eid == eid && el.dataset.kind === "orphan" ? "#f87171"
+      : (el.dataset.readoptedEid == eid ? "#34d399" : "#4f8cff");
+  });
+}
+
+/* ================================================================== */
+/* Event timeline                                                     */
+/* ================================================================== */
+function renderEvents() {
+  const evs = DATA.events || [];
+  $("#evHint").textContent = evs.length ? `（共 ${evs.length} 次，最新在前）` : "";
+  if (!evs.length) {
+    $("#eventList").innerHTML =
+      `<div class="empty"><div class="big">🟢</div>本节点尚未发生过重组，主链从未分叉切换。</div>`;
+    return;
+  }
+  $("#eventList").innerHTML = evs.map(e => `
+    <div class="card ev-card ${selectedEvent === e.id ? "selected" : ""}"
+         style="padding:12px 14px; margin-bottom:10px;" data-eid="${e.id}">
+      <div class="flex">
+        <span class="badge red">重组 R#${e.id}</span>
+        <span class="hint">${fmt.time(e.time)}</span>
+        <div class="spacer"></div>
+        <span class="badge gray">分叉高度 #${e.fork_height}</span>
+      </div>
+      <div class="grid cols-2" style="gap:6px 14px; margin-top:9px;">
+        <div class="small">
+          <div class="hint">切换前链头</div>
+          <div style="color:var(--red); font-family:var(--mono); font-size:12px;">
+            ⛔ #${e.old_head ? e.old_head.height : "?"}
+            ${e.old_head ? fmt.hash(e.old_head.hash, 6) : ""}</div>
+        </div>
+        <div class="small">
+          <div class="hint">切换后链头</div>
+          <div style="color:var(--green); font-family:var(--mono); font-size:12px;">
+            ✅ #${e.new_head ? e.new_head.height : "?"}
+            ${e.new_head ? fmt.hash(e.new_head.hash, 6) : ""}</div>
+        </div>
+      </div>
+      <div class="flex" style="margin-top:8px; gap:8px;">
+        <span class="badge red">回滚 ${e.rollback_count} 块</span>
+        <span class="badge blue">新上链 ${e.applied_count} 块</span>
+        <div class="spacer"></div>
+        <span class="hint">工作量 ${fmt.amount(e.chainwork_before)} → ${fmt.amount(e.chainwork_after)}</span>
+      </div>
+    </div>`).join("");
+  document.querySelectorAll(".ev-card").forEach(card =>
+    card.addEventListener("click", () => selectEvent(parseInt(card.dataset.eid, 10))));
+}
+
+function selectEvent(eid) {
+  selectedEvent = selectedEvent === eid ? null : eid;
+  const svg = document.querySelector("svg.forks");
+  if (svg) {
+    if (selectedEvent) {
+      applyHighlight(svg, selectedEvent);
+      const ev = (DATA.events || []).find(e => e.id === selectedEvent);
+      if (ev) {
+        const x = PAD_L + (ev.fork_height - heightMin()) * COL_W + COL_W / 2;
+        const wrap = $("#graphWrap");
+        if (wrap.scrollTo) {
+          wrap.scrollTo({ left: Math.max(0, x - wrap.clientWidth / 2),
+                          behavior: "smooth" });
+        } else wrap.scrollLeft = x;
+      }
+    } else {
+      svg.querySelectorAll(".dim,.hl").forEach(el =>
+        el.classList.remove("dim", "hl"));
+    }
+  }
+  renderEvents();
+}
+function heightMin() {
+  if (windowMode === "all" || !DATA) return 0;
+  return Math.max(0, DATA.height - parseInt(windowMode, 10) + 1);
+}
+
+/* ================================================================== */
+/* Orphan table                                                       */
+/* ================================================================== */
+function renderOrphans() {
+  const all = DATA.orphans || [];
+  $("#orphanHint").textContent = all.length ? `（共 ${all.length} 个区块）` : "";
+  if (!all.length) {
+    $("#orphanTable").innerHTML =
+      `<div class="empty"><div class="big">📦</div>还没有区块被重组丢弃。</div>`;
+    return;
+  }
+  $("#orphanTable").innerHTML = `<div class="table-wrap"><table><thead><tr>
+    <th>原高度</th><th>区块哈希</th><th>状态</th><th>淘汰于</th><th>重回主链</th><th>时间</th>
+    </tr></thead><tbody>${all.map(o => `
+      <tr class="clickable" onclick="showBlock('${o.hash}')">
+        <td class="mono-num" style="color:var(--red);">#${o.height}</td>
+        <td class="hash">${fmt.hash(o.hash, 10)}</td>
+        <td>${o.status === "abandoned"
+            ? '<span class="badge red">已丢弃</span>'
+            : '<span class="badge green">已回主链</span>'}</td>
+        <td><span class="badge ${o.status === "abandoned" ? "red" : "gray"}">R#${o.abandoned_by}</span></td>
+        <td>${o.readopted_by ? `<span class="badge green">R#${o.readopted_by}</span>`
+                             : '<span class="hint">—</span>'}</td>
+        <td class="muted small">${fmt.ago(o.abandoned_at)}</td>
+      </tr>`).join("")}</tbody></table></div>`;
+}
+
+/* ================================================================== */
+/* Block detail (main / fork-store / discarded)                       */
+/* ================================================================== */
+async function showBlock(hash) {
+  const d = await API.get("/api/block/" + hash);
+  if (!d.ok) { toast(d.error || "区块不存在", "err"); return; }
+  const card = $("#detailCard");
+  card.style.display = "block";
+
+  if (d.orphan) {
+    const o = d.block;
+    const back = o.status === "readopted";
+    card.innerHTML = `
+      <div class="flex"><h2 style="margin:0;">丢弃区块 #${o.height}</h2>
+        <span class="badge ${back ? "green" : "red"}">${back ? "后又回到主链" : "已被重组丢弃"}</span>
+        <div class="spacer"></div>
+        <button class="btn ghost sm" onclick="document.getElementById('detailCard').style.display='none'">关闭</button></div>
+      <div class="pill-row" style="margin:10px 0;">
+        <span class="badge ${back ? "gray" : "red"}">在重组 R#${o.abandoned_by} 中淘汰</span>
+        ${back ? `<span class="badge green">在重组 R#${o.readopted_by} 中重新成为主链</span>` : ""}
+      </div>
+      <dl class="kv">
+        <dt>原始高度</dt><dd class="mono-num">#${o.height}</dd>
+        <dt>区块哈希</dt><dd class="hash">${esc(o.hash)}</dd>
+        <dt>前一哈希</dt><dd class="hash">${esc(o.prev_hash)}</dd>
+        <dt>时间戳</dt><dd>${fmt.time(o.timestamp)}</dd>
+        <dt>难度 / Nonce</dt><dd class="mono-num">${o.difficulty} / ${o.nonce}</dd>
+        <dt>交易数</dt><dd class="mono-num">${o.tx_count}</dd>
+        <dt>Merkle 根</dt><dd class="hash">${esc(o.merkle_root || "—")}</dd>
+        <dt>状态根</dt><dd class="hash">${esc(o.state_root || "—")}</dd>
+      </dl>`;
+  } else {
+    const b = d.block, h = b.header;
+    const onMain = (DATA.main_chain || []).some(x => x.hash === h.hash);
+    card.innerHTML = `
+      <div class="flex"><h2 style="margin:0;">区块 #${h.index}</h2>
+        ${onMain ? '<span class="badge blue">主链</span>'
+                 : '<span class="badge amber">竞争链（未入主链）</span>'}
+        <div class="spacer"></div>
+        <button class="btn ghost sm" onclick="document.getElementById('detailCard').style.display='none'">关闭</button></div>
+      <div class="grid cols-2" style="margin-top:12px;">
+        <div><dl class="kv">
+          <dt>区块哈希</dt><dd class="hash">${esc(h.hash)}</dd>
+          <dt>前一哈希</dt><dd class="hash">${esc(h.prev_hash)}</dd>
+          <dt>时间戳</dt><dd>${fmt.time(h.timestamp)}</dd>
+          <dt>难度</dt><dd class="mono-num">${h.difficulty}</dd>
+        </dl></div>
+        <div><dl class="kv">
+          <dt>Nonce</dt><dd class="mono-num">${h.nonce}</dd>
+          <dt>交易数</dt><dd class="mono-num">${h.tx_count}</dd>
+          <dt>Merkle 根</dt><dd class="hash">${esc(h.merkle_root)}</dd>
+          <dt>状态根</dt><dd class="hash">${esc(h.state_root)}</dd>
+        </dl></div>
+      </div>
+      <div class="section-title">交易（${b.transactions.length}）</div>
+      <div class="table-wrap"><table><thead><tr>
+        <th>类型</th><th>交易ID</th><th>发送方</th><th>接收方</th><th>金额</th><th>手续费</th>
+      </tr></thead><tbody>${b.transactions.map(t => `
+        <tr><td><span class="badge blue">${fmt.shortType(t.type)}</span></td>
+          <td class="hash">${fmt.hash(t.txid, 9)}</td>
+          <td class="addr">${fmt.addr(t.sender, 6)}</td>
+          <td class="addr">${t.to ? fmt.addr(t.to, 6) : "—"}</td>
+          <td class="mono-num">${fmt.amount(t.amount)}</td>
+          <td class="mono-num">${fmt.amount(t.fee)}</td></tr>`).join("")}
+      </tbody></table></div>`;
+  }
+  card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+document.addEventListener("DOMContentLoaded", init);
+</script>
+</body>
+</html>

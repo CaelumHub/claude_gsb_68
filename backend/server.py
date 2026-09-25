@@ -19,8 +19,8 @@ from .templates import template_catalog, get_template, TEMPLATES
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "frontend")
-PAGES = ["index", "wallet", "txpool", "explorer", "deploy", "interact",
-         "nodes", "network", "stats", "admin", "templates"]
+PAGES = ["index", "wallet", "txpool", "explorer", "reorgs", "deploy",
+         "interact", "nodes", "network", "stats", "admin", "templates"]
 
 
 def _json(payload, status=200):
@@ -323,6 +323,11 @@ def create_app(node):
         else:
             block = bc.get_block_by_hash(identifier)
         if not block:
+            # A block discarded by a reorg is no longer on the chain; serve it
+            # from the reorg history so discarded blocks stay inspectable.
+            orphan = bc.get_orphan(identifier) if not identifier.isdigit() else None
+            if orphan:
+                return _json({"ok": True, "orphan": True, "block": orphan})
             return _json({"ok": False, "error": "block not found"}, 404)
         return _json({"ok": True, "block": block.to_dict()})
 
@@ -355,6 +360,10 @@ def create_app(node):
                               "difficulty": b.difficulty})
         return _json({"forks": forks, "last_abandoned": [
             b.index for b in bc.last_abandoned]})
+
+    @app.get("/api/chain/reorgs")
+    def chain_reorgs():
+        return _json(node.blockchain.reorg_overview())
 
     # ================================================================== #
     # Contracts
@@ -574,6 +583,7 @@ def create_app(node):
             shutil.rmtree(os.path.join(node.paths.root, sub), ignore_errors=True)
             os.makedirs(os.path.join(node.paths.root, sub), exist_ok=True)
         node.blockchain = _fresh_blockchain(node)
+        node.blockchain.reorg_history.clear()
         node.txpool.clear()
         node.save_txpool()
         node.log("warn", "chain reset to genesis")
