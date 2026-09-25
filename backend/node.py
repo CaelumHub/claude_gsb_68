@@ -323,13 +323,28 @@ class Node:
             except Exception as e:  # noqa: BLE001
                 summary["errors"].append(f"sync failed at height {next_h}: {e}")
                 break
+            before = (self.blockchain.height, self.blockchain.chainwork)
             for bd in batch.get("blocks", []):
                 status, message = self.receive_block(bd)
                 if status == "reorg":
                     summary["reorgs"] += 1
                 if status in ("extended", "reorg"):
                     summary["synced_blocks"] += 1
-            next_h = self.blockchain.height + 1
+            after = (self.blockchain.height, self.blockchain.chainwork)
+            if after != before:
+                # Chain moved: continue from the new tip.
+                next_h = self.blockchain.height + 1
+            elif any(b["connected"] for b in self.blockchain.side_branches()):
+                # A complete rival branch is accumulating but not yet heavier
+                # than our chain: pull the next window to extend it.
+                next_h += 100
+            elif next_h > 0:
+                # Blocks do not connect: the fork's ancestors are missing.
+                # Walk the fetch window back towards the common ancestor.
+                next_h = max(0, next_h - 100)
+            else:
+                summary["errors"].append("no common ancestor with peer's chain")
+                break
         self.save_txpool()
         self.log("info", f"sync complete: +{summary['synced_blocks']} blocks "
                          f"from {peer.id}")

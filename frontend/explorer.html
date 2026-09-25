@@ -65,6 +65,9 @@ let chain = [];
 async function init() {
   await loadChain();
   pollStatus(6000);
+  // Optional deep link, e.g. explorer.html?q=<hash|height|txid>.
+  const q = new URLSearchParams(location.search).get("q");
+  if (q) { $("#searchBox").value = q; doSearch(); }
 }
 
 async function loadChain() {

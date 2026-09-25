@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>分叉与重组 · LightChain</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<style>
+  /* ---------- fork panorama graph ---------- */
+  .fg-wrap { overflow-x: auto; padding: 10px 2px 6px; }
+  .fg-lanes { min-width: max-content; }
+  .fg-lane { display: flex; align-items: center; height: 66px; }
+  .fg-lane + .fg-lane { margin-top: 10px; }
+  .fg-label { flex: 0 0 132px; position: sticky; left: 0; z-index: 5;
+    background: var(--panel); padding: 4px 10px 4px 2px; font-size: 11px;
+    color: var(--muted); line-height: 1.35; border-right: 1px solid var(--border); }
+  .fg-label .t { font-weight: 650; font-size: 12px; color: var(--text); }
+  .fg-label.live .t { color: var(--amber); }
+  .fg-label.orphan .t { color: var(--red); }
+  .fg-cells { display: grid; grid-auto-flow: column; position: relative; }
+  .fg-cell { position: relative; width: 92px; height: 66px;
+    display: flex; align-items: center; justify-content: center; }
+  /* track line only under occupied cells, so gaps stay empty */
+  .fg-cell.occupied::before { content: ""; position: absolute; left: 0; right: 0;
+    top: 50%; height: 2px; transform: translateY(-50%); background: var(--border-2); }
+  .fg-lane.live .fg-cell.occupied::before {
+    background: repeating-linear-gradient(90deg, rgba(251,191,36,.65) 0 5px, transparent 5px 10px); }
+  .fg-lane.orphan .fg-cell.occupied::before {
+    background: repeating-linear-gradient(90deg, rgba(248,113,113,.55) 0 5px, transparent 5px 10px); }
+  .fg-cell.trunc::after { content: "…"; position: absolute; left: 3px; top: 50%;
+    transform: translateY(-50%); color: var(--faint); z-index: 3; font-size: 15px; }
+  /* elbow connector: rises from the branch lane to the fork point above */
+  .fg-cell.elbow::before { content: ""; position: absolute; left: 50%; bottom: 50%;
+    width: 2px; height: var(--up, 76px); transform: translateX(-50%);
+    background: var(--purple); }
+  .fg-cell.elbow::after { content: ""; position: absolute; left: 50%; top: 50%;
+    width: 50%; height: 2px; transform: translateY(-50%); background: var(--purple); }
+  .fg-joint { position: absolute; left: 50%; top: 50%; width: 9px; height: 9px;
+    transform: translate(-50%, -50%); border-radius: 50%;
+    background: var(--purple); z-index: 3; }
+  /* block chips */
+  .fg-blk { position: relative; z-index: 2; width: 74px; padding: 5px 3px;
+    border-radius: 8px; background: var(--panel-2); border: 1px solid var(--border-2);
+    text-align: center; cursor: pointer; transition: all .15s; }
+  .fg-blk:hover { transform: translateY(-2px); border-color: var(--accent); }
+  .fg-blk .n { font-family: var(--mono); font-weight: 700; font-size: 12px; color: var(--accent-2); }
+  .fg-blk .h { font-family: var(--mono); font-size: 9px; color: var(--faint); margin-top: 1px; }
+  .fg-blk.main { border-color: rgba(79,140,255,.45); }
+  .fg-blk.head { border-color: var(--green); box-shadow: 0 0 0 1px var(--green); }
+  .fg-blk.forkpt { border-color: var(--purple); box-shadow: 0 0 0 1px var(--purple); }
+  .fg-blk.live { border-color: var(--amber); border-style: dashed; }
+  .fg-blk.live .n { color: var(--amber); }
+  .fg-blk.orphan { border-color: var(--red); border-style: dashed; opacity: .88; }
+  .fg-blk.orphan .n { color: var(--red); }
+  .fg-tag { position: absolute; top: -9px; right: -8px; z-index: 4; font-size: 9px;
+    font-weight: 700; padding: 1px 6px; border-radius: 999px; white-space: nowrap; }
+  .fg-tag.fork { background: var(--purple); color: #14102a; }
+  .fg-tag.head { background: var(--green); color: #06251a; right: auto; left: -8px; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px;
+    font-size: 11.5px; color: var(--muted); }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 4px;
+    margin-right: 5px; vertical-align: -2px; border: 1px solid var(--border-2); }
+  .legend i.main { border-color: rgba(79,140,255,.55); background: var(--panel-2); }
+  .legend i.head { border-color: var(--green); }
+  .legend i.forkpt { border-color: var(--purple); }
+  .legend i.live { border-color: var(--amber); border-style: dashed; }
+  .legend i.orphan { border-color: var(--red); border-style: dashed; }
+
+  /* ---------- reorg timeline ---------- */
+  .tl { margin: 6px 0 0 8px; padding-left: 26px; border-left: 2px solid var(--border-2); }
+  .tl-event { position: relative; padding-bottom: 22px; }
+  .tl-event:last-child { padding-bottom: 4px; }
+  .tl-event::before { content: ""; position: absolute; left: -33px; top: 5px;
+    width: 12px; height: 12px; border-radius: 50%; background: var(--red);
+    box-shadow: 0 0 0 4px rgba(248,113,113,.15); }
+  .tip-switch { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  .tip-chip { display: inline-flex; gap: 7px; align-items: baseline; padding: 6px 11px;
+    border-radius: 8px; border: 1px solid var(--border-2); background: var(--panel-2);
+    font-family: var(--mono); font-size: 12px; cursor: pointer; }
+  .tip-chip:hover { border-color: var(--accent); }
+  .tip-chip.old { border-color: rgba(248,113,113,.5); }
+  .tip-chip.old .n { color: var(--red); font-weight: 700; }
+  .tip-chip.new { border-color: rgba(52,211,153,.5); }
+  .tip-chip.new .n { color: var(--green); font-weight: 700; }
+  .tip-chip .h { color: var(--faint); font-size: 11px; }
+  .sw-arrow { color: var(--muted); font-size: 17px; font-weight: 700; }
+  .mf { margin-top: 12px; display: flex; flex-direction: column; gap: 7px; }
+  .mf-row { display: flex; align-items: center; gap: 8px; }
+  .mf-label { flex: 0 0 118px; font-size: 11px; color: var(--muted); }
+  .mf-track { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .mf-arrow { color: var(--faint); font-size: 11px; }
+  .mf-blk { padding: 4px 9px; border-radius: 6px; font-family: var(--mono);
+    font-size: 11.5px; border: 1px solid var(--border-2); background: var(--panel-2);
+    cursor: pointer; }
+  .mf-blk:hover { border-color: var(--accent); }
+  .mf-blk.fork { border-color: var(--purple); color: var(--purple); cursor: default; }
+  .mf-blk.orphan { border-color: var(--red); border-style: dashed; color: var(--red); }
+  .mf-blk.win { border-color: var(--green); color: var(--green); }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside id="sidebar"></aside>
+  <div class="main">
+    <header id="topbar"></header>
+    <main class="content">
+      <div class="page-head">
+        <h1>分叉与重组</h1>
+        <p>主链之外，把曾经出现过的竞争链、分叉点与每次重组淘汰的区块完整还原出来。</p>
+      </div>
+
+      <div class="grid cols-4">
+        <div class="card stat accent"><div class="label">重组次数</div><div class="value" id="stReorgs">—</div></div>
+        <div class="card stat red"><div class="label">被丢弃区块</div><div class="value" id="stOrphans">—</div></div>
+        <div class="card stat amber"><div class="label">最大回滚深度</div><div class="value" id="stDepth">—</div></div>
+        <div class="card stat purple"><div class="label">存活竞争链</div><div class="value" id="stLive">—</div></div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <div class="flex">
+          <h2 style="margin:0;">分叉全景图 <span class="hint" id="graphHint"></span></h2>
+          <div class="spacer"></div>
+          <button class="btn ghost sm" onclick="loadAll(false)">刷新</button>
+        </div>
+        <p class="hint" style="margin:8px 0 0;">按高度对齐：主链在最上方，每条竞争/被淘汰分支占一条泳道，紫色竖线指回分叉点。点击任意区块查看详情（不影响主链浏览）。</p>
+        <div id="forkGraph" class="fg-wrap"></div>
+        <div class="legend">
+          <span><i class="main"></i>主链区块</span>
+          <span><i class="head"></i>当前链头</span>
+          <span><i class="forkpt"></i>分叉点</span>
+          <span><i class="live"></i>竞争链（存活）</span>
+          <span><i class="orphan"></i>已淘汰区块</span>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <h2>重组时间轴 <span class="hint">链头在每次重组前后如何切换</span></h2>
+        <div id="timeline"></div>
+      </div>
+
+      <div class="card" style="margin-top:16px;">
+        <h2>被丢弃的区块 <span class="hint" id="orphanHint"></span></h2>
+        <div id="orphanTable"></div>
+      </div>
+
+      <div id="detailCard" class="card" style="margin-top:16px; display:none;"></div>
+    </main>
+  </div>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/app.js"></script>
+<script>
+window.PAGE = "reorgs";
+const LANE_PITCH = 76;          // fg-lane height (66) + margin (10)
+const MAX_COLS = 64;
+
+let CHAIN = [], REORGS = [], SIDES = [], STATS = {}, HEIGHT = 0, HEAD = null;
+let BYHASH = {}, STATUS = {};   // hash -> block summary / {kind, reorgId}
+
+async function init() {
+  await loadAll(true);
+  pollStatus(6000);
+  setInterval(() => loadAll(false), 8000);
+}
+
+async function loadAll(scrollEnd) {
+  let chain, rej;
+  try {
+    [chain, rej] = await Promise.all([
+      API.get("/api/chain"), API.get("/api/chain/reorgs")]);
+  } catch (e) { return; }       // node offline; topbar already shows it
+  CHAIN = chain.blocks;
+  HEIGHT = rej.height; HEAD = rej.head_hash;
+  REORGS = rej.reorgs; SIDES = rej.side_chains; STATS = rej.stats;
+  buildIndexes();
+  renderStats();
+  renderGraph(scrollEnd);
+  renderTimeline();
+  renderOrphans();
+}
+
+/* A block may move between roles over time (rival -> main, main -> orphan),
+ * so resolve its *current* status with main > orphan > live priority. */
+function buildIndexes() {
+  BYHASH = {}; STATUS = {};
+  REORGS.forEach(e => {
+    BYHASH[e.fork_hash] = BYHASH[e.fork_hash] ||
+      { index: e.fork_height, hash: e.fork_hash };
+    e.abandoned.forEach(b => { BYHASH[b.hash] = b; });
+    e.applied.forEach(b => { BYHASH[b.hash] = b; });
+  });
+  SIDES.forEach(s => s.blocks.forEach(b => {
+    BYHASH[b.hash] = b;
+    STATUS[b.hash] = { kind: "live" };
+  }));
+  REORGS.forEach(e => e.abandoned.forEach(b => {
+    STATUS[b.hash] = { kind: "orphan", reorgId: e.id };
+  }));
+  CHAIN.forEach(b => {
+    BYHASH[b.hash] = b;
+    STATUS[b.hash] = { kind: "main" };
+  });
+}
+
+function renderStats() {
+  $("#stReorgs").textContent = STATS.reorg_count;
+  $("#stOrphans").textContent = STATS.orphaned_blocks;
+  $("#stDepth").textContent = STATS.max_depth;
+  $("#stLive").textContent = STATS.live_forks;
+}
+
+/* ---------------- fork panorama graph ---------------- */
+function renderGraph(scrollEnd) {
+  const box = $("#forkGraph");
+  const forkCount = {};
+  REORGS.forEach(e => { forkCount[e.fork_height] = (forkCount[e.fork_height] || 0) + 1; });
+  SIDES.forEach(s => {
+    if (s.connected && s.fork_height != null)
+      forkCount[s.fork_height] = (forkCount[s.fork_height] || 0) + 1;
+  });
+
+  const to = HEIGHT;
+  let from;
+  const forks = Object.keys(forkCount).map(Number);
+  if (forks.length) {
+    from = Math.min(Math.min(...forks), to);
+    if (to - from + 1 > MAX_COLS) from = to - MAX_COLS + 1;
+  } else {
+    from = Math.max(0, to - 23);
+  }
+  const cols = to - from + 1;
+
+  // Branch lanes: live rivals first, then historical orphaned segments.
+  const lanes = [];
+  SIDES.forEach((s, i) => {
+    if (!s.blocks.length) return;
+    const first = s.blocks[0].index, last = s.blocks[s.blocks.length - 1].index;
+    lanes.push({
+      kind: "live",
+      label: `竞争链 #${i + 1}`,
+      sub: s.connected ? `存活中 · 长度 ${s.length}（#${first}–#${last}）`
+                       : `祖先未知 · 已存 ${s.length} 块`,
+      forkHeight: s.connected ? s.fork_height : null,
+      blocks: s.blocks,
+    });
+  });
+  REORGS.slice().reverse().forEach(e => lanes.push({
+    kind: "orphan",
+    label: `重组 #${e.id} 淘汰分支`,
+    sub: `长度 ${e.depth} · ${fmt.ago(e.time)}`,
+    forkHeight: e.fork_height,
+    blocks: e.abandoned,
+  }));
+  const visible = lanes.filter(l =>
+    l.blocks.some(b => b.index >= from && b.index <= to) ||
+    (l.forkHeight != null && l.forkHeight >= from));
+
+  $("#graphHint").textContent =
+    `（高度 #${from} – #${to} · ${visible.length} 条分支）`;
+
+  // Main lane.
+  let html = `<div class="fg-lanes" style="min-width:${132 + cols * 92}px">`;
+  html += `<div class="fg-lane main">
+    <div class="fg-label"><div class="t">主链</div><div>当前高度 #${HEIGHT}</div></div>
+    <div class="fg-cells">`;
+  for (let h = from; h <= to; h++) {
+    const b = CHAIN[h];
+    if (!b) {   // chain moved between the two fetches; leave the cell empty
+      html += `<div class="fg-cell"></div>`;
+      continue;
+    }
+    const nf = forkCount[h] || 0;
+    html += `<div class="fg-cell occupied">${fgBlock(b, "main", {
+      head: b.hash === HEAD,
+      fork: nf ? (nf > 1 ? `⑂ 分叉×${nf}` : "⑂ 分叉点") : null,
+    })}</div>`;
+  }
+  html += `</div></div>`;
+
+  // Branch lanes.
+  visible.forEach((lane, li) => {
+    const at = {};
+    lane.blocks.forEach(b => { at[b.index] = b; });
+    html += `<div class="fg-lane ${lane.kind}">
+      <div class="fg-label ${lane.kind}"><div class="t">${esc(lane.label)}</div>
+        <div>${esc(lane.sub)}</div></div>
+      <div class="fg-cells">`;
+    for (let c = 0; c < cols; c++) {
+      const h = from + c;
+      const b = at[h];
+      if (b) {
+        const trunc = h === lane.blocks[0].index &&
+                      (lane.forkHeight == null || lane.forkHeight < from);
+        html += `<div class="fg-cell occupied ${trunc ? "trunc" : ""}">${fgBlock(b, lane.kind)}</div>`;
+      } else if (lane.forkHeight === h) {
+        html += `<div class="fg-cell elbow" style="--up:${(li + 1) * LANE_PITCH}px"><span class="fg-joint"></span></div>`;
+      } else {
+        html += `<div class="fg-cell"></div>`;
+      }
+    }
+    html += `</div></div>`;
+  });
+  html += `</div>`;
+  box.innerHTML = html;
+  if (scrollEnd) box.scrollLeft = box.scrollWidth;
+}
+
+function fgBlock(b, kind, opt = {}) {
+  const cls = ["fg-blk", kind];
+  if (opt.head) cls.push("head");
+  if (opt.fork) cls.push("forkpt");
+  const tags = (opt.head ? `<span class="fg-tag head">链头</span>` : "") +
+               (opt.fork ? `<span class="fg-tag fork">${opt.fork}</span>` : "");
+  return `<div class="${cls.join(" ")}" data-h="${esc(b.hash)}" onclick="showHash(this.dataset.h)"
+      title="#${b.index} ${esc(b.hash)}">${tags}
+    <div class="n">#${b.index}</div>
+    <div class="h">${b.hash.slice(0, 6)}…${b.hash.slice(-4)}</div>
+    <div class="h">${b.tx_count != null ? b.tx_count + " tx" : ""}</div>
+  </div>`;
+}
+
+/* ---------------- reorg timeline ---------------- */
+function renderTimeline() {
+  const box = $("#timeline");
+  if (!REORGS.length) {
+    box.innerHTML = `<div class="empty"><div class="big">🔀</div>尚未发生重组
+      <div class="small" style="margin-top:6px;">当更重的竞争分支出现时，链头切换的完整过程会记录在这里。</div></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="tl">${REORGS.slice().reverse().map(e => {
+    const fork = { index: e.fork_height, hash: e.fork_hash };
+    const arrow = `<span class="mf-arrow">→</span>`;
+    const row = (blocks, kind) =>
+      [`<span class="mf-blk fork" title="分叉点 ${esc(e.fork_hash)}">⑂ #${e.fork_height}</span>`]
+        .concat(blocks.map(b =>
+          `<span class="mf-blk ${kind}" data-h="${esc(b.hash)}" onclick="showHash(this.dataset.h)"
+             title="#${b.index} ${esc(b.hash)}">#${b.index}${kind === "orphan" ? " ✕" : " ✓"}</span>`))
+        .join(arrow);
+    return `<div class="tl-event">
+      <div class="flex" style="gap:8px;">
+        <span class="badge red">🔄 重组 #${e.id}</span>
+        <span class="muted small">${fmt.time(e.time)}（${fmt.ago(e.time)}）</span>
+        <span class="spacer"></span>
+        <span class="badge gray">回滚 ${e.depth} 块</span>
+        <span class="badge green">应用 ${e.applied.length} 块</span>
+      </div>
+      <div class="tip-switch">
+        <span class="muted small">链头切换</span>
+        <span class="tip-chip old" data-h="${esc(e.old_head.hash)}" onclick="showHash(this.dataset.h)"
+              title="重组前链头 ${esc(e.old_head.hash)}">
+          <span class="n">#${e.old_head.index}</span><span class="h">${fmt.hash(e.old_head.hash, 6)}</span></span>
+        <span class="sw-arrow">⟶</span>
+        <span class="tip-chip new" data-h="${esc(e.new_head.hash)}" onclick="showHash(this.dataset.h)"
+              title="重组后链头 ${esc(e.new_head.hash)}">
+          <span class="n">#${e.new_head.index}</span><span class="h">${fmt.hash(e.new_head.hash, 6)}</span></span>
+      </div>
+      <div class="mf">
+        <div class="mf-row"><span class="mf-label">旧链段 · 被淘汰</span>
+          <div class="mf-track">${row(e.abandoned, "orphan")}</div></div>
+        <div class="mf-row"><span class="mf-label">新链段 · 成为主链</span>
+          <div class="mf-track">${row(e.applied, "win")}</div></div>
+      </div>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+/* ---------------- orphaned blocks table ---------------- */
+function renderOrphans() {
+  const rows = [];
+  REORGS.forEach(e => e.abandoned.forEach(b =>
+    rows.push(Object.assign({ reorgId: e.id, reorgTime: e.time }, b))));
+  $("#orphanHint").textContent = rows.length ? `（共 ${rows.length} 个）` : "";
+  if (!rows.length) {
+    $("#orphanTable").innerHTML = `<div class="empty">暂未被重组丢弃的区块</div>`;
+    return;
+  }
+  rows.sort((a, b) => b.reorgId - a.reorgId || b.index - a.index);
+  $("#orphanTable").innerHTML = `<div class="table-wrap"><table><thead><tr>
+    <th>原高度</th><th>区块哈希</th><th>矿工</th><th>交易数</th><th>出块时间</th><th>淘汰于</th><th>重组时间</th>
+    </tr></thead><tbody>${rows.map(b => `
+    <tr class="clickable" data-h="${esc(b.hash)}" onclick="showHash(this.dataset.h)">
+      <td class="mono-num" style="color:var(--red);">#${b.index}</td>
+      <td class="hash">${fmt.hash(b.hash, 10)}</td>
+      <td class="addr">${b.miner ? fmt.addr(b.miner, 6) : "—"}</td>
+      <td class="mono-num">${b.tx_count}</td>
+      <td class="muted small">${fmt.time(b.timestamp)}</td>
+      <td><span class="badge red">重组 #${b.reorgId}</span></td>
+      <td class="muted small">${fmt.ago(b.reorgTime)}</td>
+    </tr>`).join("")}</tbody></table></div>`;
+}
+
+/* ---------------- block detail (in-page, read-only) ---------------- */
+function openExplorer(hash) {
+  location.href = "explorer.html?q=" + encodeURIComponent(hash);
+}
+
+function showHash(hash) {
+  const b = BYHASH[hash];
+  if (!b) return toast("未找到该区块的数据", "err");
+  const st = STATUS[hash] || { kind: "archive" };
+  const badges = {
+    main: `<span class="badge green">✓ 主链区块</span>`,
+    live: `<span class="badge amber">⏳ 竞争链 · 尚未决出胜负</span>`,
+    orphan: `<span class="badge red">✕ 已淘汰 · 重组 #${st.reorgId}</span>`,
+    archive: `<span class="badge gray">历史档案</span>`,
+  };
+  const notes = {
+    main: "",
+    live: "该区块位于竞争分支上，仍在与主链竞争：分支变重则会触发重组，否则最终会被丢弃。",
+    orphan: "该区块已被重组从主链上移除，数据来自重组档案；其中的交易已被退回交易池等待重新打包。",
+    archive: "该区块不在当前主链上，信息来自重组历史档案。",
+  };
+  const card = $("#detailCard");
+  card.style.display = "block";
+  card.innerHTML = `
+    <div class="flex"><h2 style="margin:0;">区块 #${b.index}</h2>
+      ${badges[st.kind]}
+      <div class="spacer"></div>
+      ${st.kind === "main" ? `<button class="btn ghost sm" data-h="${esc(b.hash)}" onclick="openExplorer(this.dataset.h)">在区块浏览器中查看</button>` : ""}
+      <button class="btn ghost sm" onclick="document.getElementById('detailCard').style.display='none'">关闭</button></div>
+    ${notes[st.kind] ? `<p class="hint" style="margin:10px 0 0;">${notes[st.kind]}</p>` : ""}
+    <div class="grid cols-2" style="margin-top:12px;">
+      <div><dl class="kv">
+        <dt>区块哈希</dt><dd class="hash">${esc(b.hash)}</dd>
+        <dt>前一哈希</dt><dd class="hash">${esc(b.prev_hash || "—")}</dd>
+        <dt>原高度</dt><dd>#${b.index}</dd>
+        <dt>矿工</dt><dd class="addr">${b.miner ? esc(b.miner) : "—"}</dd>
+      </dl></div>
+      <div><dl class="kv">
+        <dt>出块时间</dt><dd>${b.timestamp != null ? fmt.time(b.timestamp) : "—"}</dd>
+        <dt>难度</dt><dd>${b.difficulty != null ? b.difficulty : "—"}</dd>
+        <dt>Nonce</dt><dd>${b.nonce != null ? b.nonce : "—"}</dd>
+        <dt>交易数</dt><dd>${b.tx_count != null ? b.tx_count : "—"}</dd>
+      </dl></div>
+    </div>`;
+  card.scrollIntoView({ behavior: "smooth" });
+}
+
+document.addEventListener("DOMContentLoaded", init);
+</script>
+</body>
+</html>

@@ -19,6 +19,7 @@ from . import crypto, pow as pow_mod
 from .block import Block, make_genesis_block
 from .config import COINBASE_REWARD, GENESIS_PREV_HASH
 from .contract import ContractEngine
+from .reorg import ReorgLog, summarize_block
 from .state import WorldState, ZERO_ADDRESS
 from .storage import (DataPaths, VersionLedger, atomic_write_json, read_json)
 from .transaction import Transaction, TX_COINBASE
@@ -39,6 +40,7 @@ class Blockchain:
         self.chainwork = 0              # cumulative work of the main chain
         self.engine = ContractEngine(cfg)
         self.versions = VersionLedger(paths.versions_path)
+        self.reorgs = ReorgLog(paths.reorgs_path)
         self.last_abandoned = []
         self.last_receipts = []
         self._loaded = False
@@ -276,7 +278,10 @@ class Blockchain:
             ok, reason = self.validate_block(block, prev)
             if not ok:
                 return "invalid", reason
-            return self._extend(block)
+            status, message = self._extend(block)
+            if status == "extended":
+                self._promote_forks()
+            return status, message
 
         if block.index <= self.height:
             return self._maybe_extend_fork(block)
@@ -319,11 +324,41 @@ class Blockchain:
         if branch is None:
             return "stored_fork", "competing block stored (branch incomplete)"
         branch_work = self.cumulative_work_of(branch)
+        # Work of the main chain up to and including the common ancestor
+        # (chain[:branch[0].index] == heights 0..ancestor_height).
         main_work_at_ancestor = self.cumulative_work_of(
-            self.chain[:branch[0].index + 1]) if branch else 0
+            self.chain[:branch[0].index]) if branch else 0
         if branch_work + main_work_at_ancestor > self.chainwork:
-            return self._reorg(branch)
+            result = self._reorg(branch)
+            if result[0] == "reorg":
+                self._promote_forks()
+            return result
         return "stored_fork", "competing block stored (weaker branch)"
+
+    def _promote_forks(self):
+        """Extend the chain with stored fork blocks that now fit the head.
+
+        Fork blocks are stored before their ancestry is complete; once an
+        extension or a reorg makes one of them a direct child of the head,
+        it becomes an ordinary candidate and is validated and applied here.
+        """
+        while True:
+            nxt = self.height + 1
+            head = self.head
+            promoted = False
+            for b in list(self.fork_store.get(nxt, [])):
+                if b.prev_hash != head.hash:
+                    continue
+                ok, _reason = self.validate_block(b, head)
+                if not ok:
+                    continue
+                status, _msg = self._extend(b)
+                if status == "extended":
+                    self.fork_store.pop(nxt, None)
+                    promoted = True
+                    break
+            if not promoted:
+                return
 
     def _trace_branch(self, tip):
         """Walk fork_store back to a block whose parent is on the main chain."""
@@ -355,6 +390,7 @@ class Blockchain:
         """
         ancestor_height = branch[0].index - 1
         abandoned = self.chain[ancestor_height + 1:]
+        old_head = self.head
 
         # Roll back state to the ancestor snapshot.
         ancestor_state_data = read_json(self.paths.state_path(ancestor_height))
@@ -384,9 +420,64 @@ class Blockchain:
         # Clean fork_store of now-main blocks.
         for b in branch:
             self.fork_store.pop(b.index, None)
+        try:
+            self.reorgs.record(
+                fork_height=ancestor_height,
+                fork_hash=self.chain[ancestor_height].hash,
+                old_head=old_head, new_head=self.head,
+                abandoned=abandoned, applied=branch)
+        except Exception:  # noqa: BLE001 - history must never break consensus
+            pass
         return "reorg", (f"reorg at height {ancestor_height}: "
                          f"rolled back {len(abandoned)} block(s), "
                          f"applied {applied} block(s)")
+
+    def side_branches(self):
+        """Group the fork store into rival branches for the reorg view.
+
+        Each entry is ``{"tip_hash", "fork_height", "fork_hash", "connected",
+        "length", "blocks"}`` where ``blocks`` are summaries in ascending
+        height order.  ``connected`` is False when the branch's ancestry is
+        incomplete, so the fork point on the main chain is unknown.
+        """
+        by_hash = {}
+        for blocks in self.fork_store.values():
+            for b in blocks:
+                by_hash[b.hash] = b
+        referenced = {b.prev_hash for b in by_hash.values()
+                      if b.prev_hash in by_hash}
+        tips = [b for h, b in by_hash.items() if h not in referenced]
+        branches = []
+        for tip in sorted(tips, key=lambda b: (b.index, b.hash)):
+            branch = self._trace_branch(tip)
+            if branch is not None:
+                fork_height = branch[0].index - 1
+                ancestor = self.get_block(fork_height)
+                branches.append({
+                    "tip_hash": tip.hash,
+                    "fork_height": fork_height,
+                    "fork_hash": ancestor.hash if ancestor else None,
+                    "connected": True,
+                    "length": len(branch),
+                    "blocks": [summarize_block(b) for b in branch],
+                })
+                continue
+            # Ancestry incomplete: walk back as far as the fork store goes.
+            partial, current, seen = [], tip, set()
+            while current is not None and current.hash not in seen:
+                seen.add(current.hash)
+                partial.append(current)
+                current = by_hash.get(current.prev_hash)
+            partial.reverse()
+            branches.append({
+                "tip_hash": tip.hash,
+                "fork_height": None,
+                "fork_hash": partial[0].prev_hash if partial else None,
+                "connected": False,
+                "length": len(partial),
+                "blocks": [summarize_block(b) for b in partial],
+            })
+        return branches
 
     def rollback(self, target_height):
         """Roll the chain back to ``target_height`` (admin operation)."""

@@ -19,8 +19,8 @@ from .templates import template_catalog, get_template, TEMPLATES
 
 FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "frontend")
-PAGES = ["index", "wallet", "txpool", "explorer", "deploy", "interact",
-         "nodes", "network", "stats", "admin", "templates"]
+PAGES = ["index", "wallet", "txpool", "explorer", "reorgs", "deploy",
+         "interact", "nodes", "network", "stats", "admin", "templates"]
 
 
 def _json(payload, status=200):
@@ -356,6 +356,26 @@ def create_app(node):
         return _json({"forks": forks, "last_abandoned": [
             b.index for b in bc.last_abandoned]})
 
+    @app.get("/api/chain/reorgs")
+    def chain_reorgs():
+        """Reorg history + live rival branches for the fork/reorg view."""
+        bc = node.blockchain
+        events = bc.reorgs.all()
+        side = bc.side_branches()
+        orphaned = sum(len(e.get("abandoned", [])) for e in events)
+        return _json({
+            "height": bc.height,
+            "head_hash": bc.head.hash if bc.head else None,
+            "reorgs": events,
+            "side_chains": side,
+            "stats": {
+                "reorg_count": len(events),
+                "orphaned_blocks": orphaned,
+                "max_depth": max([e.get("depth", 0) for e in events] or [0]),
+                "live_forks": len(side),
+            },
+        })
+
     # ================================================================== #
     # Contracts
     # ================================================================== #
@@ -573,6 +593,8 @@ def create_app(node):
         for sub in ("blocks", "state", "contracts"):
             shutil.rmtree(os.path.join(node.paths.root, sub), ignore_errors=True)
             os.makedirs(os.path.join(node.paths.root, sub), exist_ok=True)
+        # The reorg log refers to blocks of the old chain; clear it too.
+        atomic_write_json(node.paths.reorgs_path, [])
         node.blockchain = _fresh_blockchain(node)
         node.txpool.clear()
         node.save_txpool()

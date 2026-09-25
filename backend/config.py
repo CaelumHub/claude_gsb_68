@@ -40,6 +40,7 @@ TXPOOL_FILE = "txpool.json"
 WALLETS_FILE = "wallets.json"
 VERSIONS_FILE = "versions.json"
 LOGS_FILE = "logs.json"
+REORG_FILE = "reorgs.json"
 CONTRACTS_SUBDIR = "contracts"
 
 # ---------------------------------------------------------------------------
